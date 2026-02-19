@@ -26,7 +26,7 @@ For questions/communication, use the [slack workspace](https://ethEpigen2026.sla
 | 11 | 05.22 | Multi-modal integration                                                  | Multi-modal integration                                             |
 | 12 | 05.29 | Single-cell chromatin assays;<br/>chromatin and disease; open questions  | Projects |
 
-* I'm away on the 6th of March, and the course will be held online.
-&#35; On the 15th of may there is teaching, but since the 14th is a holiday and many people are away, there will be the option to join online and the class will be recorded.
+- * I'm away on the 6th of March, and the course will be held online.
+- &#35; On the 15th of may there is teaching, but since the 14th is a holiday and many people are away, there will be the option to join online and the class will be recorded.
 
 As I am making adjustments to the course this year, the course plan is subject to change.

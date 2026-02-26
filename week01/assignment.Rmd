@@ -1,0 +1,9 @@
+---
+title: "Week 01 — Setup"
+output: html_document
+---
+
+```{r setup, message=FALSE}
+library(epiwraps)
+sessionInfo()
+```

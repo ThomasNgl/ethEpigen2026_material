@@ -15,9 +15,26 @@ suppressPackageStartupMessages({
 ```
 
 ```{r}
-ah <- AnnotationHub()
-query_results <- query(ah, c("Drosophila", "EnsDb"))
+dir.create("/mnt/auxiliary/.cache/R/AnnotationHub", recursive = TRUE, showWarnings = FALSE)
+
+ah <- AnnotationHub::AnnotationHub(
+  cache = "/mnt/auxiliary/.cache/R/AnnotationHub"
+)
+query_results <- query(ah, c("Mus Musculus", "EnsDb"))
 
 ensdb <- ah[["AH113629"]]
 ensdb
+
+fly_pcg <- genes(ensdb, filter =~gene_biotype=="protein_coding")
+length(fly_pcg)
+
+IntegerList() # use this 
+```
+
+```{r}
+fly_genes <- genes(ensbd)
+granges(fly_genes)
+mcols(fly_genes)
+
+plotSignalTracks()
 ```

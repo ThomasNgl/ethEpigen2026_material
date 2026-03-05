@@ -1,0 +1,115 @@
+---
+title: "assignment"
+output: html_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(GenomicFeatures)
+  library(ensembldb)
+  library(GenomicRanges)
+  library(epiwraps)      # visualization
+  library(ggplot2)
+})
+ah <- AnnotationHub::AnnotationHub(
+  cache = "/mnt/auxiliary/.cache/R/AnnotationHub"
+)
+```
+
+# ● Using AnnotationHub, find and download the following annotations data:
+```{r}
+#○ The mouse (Mus Musculus) EnsDb object, version 102, genome build GRCm38
+query_mmensdb <- query(ah, c("EnsDb", "Mus musculus", "v102", "GRCm38"))
+query_mmensdb
+
+mmensdb_idx <- grep("EnsDb\\.Mmusculus\\.v102", query_mmensdb$title)
+if (length(mmensdb_idx) == 0) mmensdb_idx <- 1L
+mmensdb <- query_mmensdb[[mmensdb_idx[1]]]
+mmensdb
+```
+
+```{r}
+#○ The mouse genome sequence ( dna_sm ) in TwoBit/2bit format for GRCm38
+q_mm2bit <- query(ah, c("Mus musculus", "GRCm38", "TwoBit", "dna_sm"))
+q_mm2bit
+
+mm2bit_idx <- grep("dna_sm", q_mm2bit$title)
+if (length(mm2bit_idx) == 0) mm2bit_idx <- 1L
+mm2bit <- q_mm2bit[[mm2bit_idx[1]]]
+mm2bit
+```
+
+```{r}
+#○ The drosophila melanogaster genome sequence ( dna_sm ) in TwoBit/2bit format for BDGP6
+q_dm2bit <- query(ah, c("Drosophila melanogaster", "BDGP6", "TwoBit", "dna_sm"))
+q_dm2bit
+
+dm2bit_idx <- grep("dna_sm", q_dm2bit$title)
+if (length(dm2bit_idx) == 0) dm2bit_idx <- 1L
+dm2bit <- q_dm2bit[[dm2bit_idx[1]]]
+dm2bit
+```
+
+#● Using the mouse EnsDb, find the following:
+```{r}
+#○ How many different ensembl gene IDs and gene symbols are there for protein-coding genes?
+pc_genes <- genes(
+  mmensdb,
+  filter = list(GeneBiotypeFilter("protein_coding"))
+)
+n_gene_ids <- length(unique(pc_genes$gene_id))
+n_gene_symbols <- length(unique(pc_genes$gene_name))
+
+cat(sprintf(
+  "There are %d distinct Ensembl gene IDs and %d distinct gene symbols among protein-coding genes.\n",
+  n_gene_ids, n_gene_symbols
+))
+```
+
+```{r}
+#○ Plot the distribution of the (spliced) length of protein-coding transcripts
+pc_txs <- transcripts(
+  mmensdb,
+  filter = list(TxBiotypeFilter("protein_coding")),
+  columns = c("tx_id", "tx_name")
+)
+
+pc_tx_ids <- unique(pc_txs$tx_id)
+
+## exons grouped by transcript for protein-coding transcripts only
+ex_by_tx <- exonsBy(mmensdb, by = "tx", filter = list(TxIdFilter(pc_tx_ids)))
+
+## spliced length = sum of non-overlapping exon widths per transcript
+spliced_len <- vapply(ex_by_tx, function(gr) {
+  sum(width(reduce(gr)))
+}, numeric(1))
+
+df_len <- data.frame(
+  tx_id = names(spliced_len),
+  spliced_length = as.numeric(spliced_len)
+)
+summary(df_len$spliced_length)
+
+ggplot(df_len, aes(x = spliced_length)) +
+  geom_histogram(bins = 80) +
+  scale_x_continuous(labels = scales::comma) +
+  labs(
+    x = "Spliced transcript length (bp)",
+    y = "Number of transcripts",
+    title = "Protein-coding transcript spliced length distribution (mouse, EnsDb v102 GRCm38)"
+  )
+```
+```{r}
+ggplot(df_len, aes(x = spliced_length)) +
+  geom_histogram(bins = 80) +
+  scale_x_log10(labels = scales::comma) +
+  labs(
+    x = "Spliced transcript length (bp, log10 scale)",
+    y = "Number of transcripts",
+    title = "Protein-coding transcript spliced length distribution (mouse, EnsDb v102 GRCm38)"
+  )
+```
+
+
+

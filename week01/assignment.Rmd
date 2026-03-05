@@ -7,3 +7,8 @@ output: html_document
 library(epiwraps)
 sessionInfo()
 ```
+
+```{r}
+rmarkdown::render('assignment.Rmd', output_file='assignment.html')
+```
+

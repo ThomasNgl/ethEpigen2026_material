@@ -1,0 +1,137 @@
+---
+title: "CTCF ChIP-seq assignment"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(timeout = 3600)
+
+Sys.setenv(
+  PATH = paste(
+    "/mnt/conda/envs/epic_matriline_env/bin",
+    Sys.getenv("PATH"),
+    sep = ":"
+  )
+)
+
+dir.create("raw", showWarnings = FALSE)
+dir.create("trimmed", showWarnings = FALSE)
+dir.create("aligned", showWarnings = FALSE)
+dir.create("peaks", showWarnings = FALSE)
+dir.create("plots", showWarnings = FALSE)
+
+Sys.which(c("trimmomatic","bowtie2","bowtie2-build","samtools","macs3"))
+```
+
+```{r download}
+download.file(
+  "https://www.encodeproject.org/files/ENCFF127RRR/@@download/ENCFF127RRR.fastq.gz",
+  destfile = "raw/ENCFF127RRR.fastq.gz",
+  mode = "wb"
+)
+file.info("raw/ENCFF127RRR.fastq.gz")[, "size", drop = FALSE]
+```
+
+```{bash}
+zcat raw/ENCFF127RRR.fastq.gz | head -8
+```
+```{bash}
+mkdir -p trimmed
+trimmomatic SE -threads 8 -phred33 \
+raw/ENCFF127RRR.fastq.gz \
+trimmed/ENCFF127RRR.fastq.gz \
+ILLUMINACLIP:/mnt/conda/envs/epic_matriline_env/share/trimmomatic/adapters/TruSeq3-SE.fa:2:15:4:4:true \
+LEADING:20 TRAILING:20 SLIDINGWINDOW:4:15 MINLEN:25
+```
+```{bash}
+zcat trimmed/ENCFF127RRR.fastq.gz | head -8
+```
+```{r}
+library(AnnotationHub)
+library(rtracklayer)
+
+ah <- AnnotationHub::AnnotationHub(
+    cache = "/mnt/auxiliary/.cache/R/AnnotationHub"
+)
+genome <- ah[["AH49674"]]
+
+dir.create("BDGP6_genome", showWarnings = FALSE)
+
+export(import.2bit(genome),
+       "BDGP6_genome/genome.fasta.gz",
+       compress = TRUE)
+```
+
+```{bash}
+ls -lh BDGP6_genome
+```
+
+```{bash}
+bowtie2-build --threads 13 BDGP6_genome/genome.fasta.gz BDGP6_genome/bowtie2_bdgp6
+```
+
+```{bash}
+(bowtie2 -p 12 \
+  -x BDGP6_genome/bowtie2_bdgp6 \
+  -U trimmed/ENCFF127RRR.fastq.gz) \
+  2> aligned/ctcf_bdgp6.bowtie2.log | \
+  samtools view -bS - | \
+  samtools sort -@12 -o aligned/ctcf_bdgp6.bam
+samtools index aligned/ctcf_bdgp6.bam
+```
+
+```{bash}
+samtools flagstat aligned/ctcf_bdgp6.bam
+cat aligned/ctcf_bdgp6.bowtie2.log
+```
+
+
+```{bash}
+mkdir -p peaks
+
+macs3 callpeak \
+  -t aligned/ctcf_bdgp6.bam \
+  -f BAM \
+  -g dm \
+  -n ctcf_bdgp6 \
+  --outdir peaks
+```
+
+```{bash}
+wc -l peaks/ctcf_bdgp6_peaks.narrowPeak
+```
+
+```{r}
+library(AnnotationHub)
+library(rtracklayer)
+library(GenomicRanges)
+library(ensembldb)
+ah <- AnnotationHub::AnnotationHub(
+  cache = "/mnt/auxiliary/.cache/R/AnnotationHub"
+)
+peaks <- import("peaks/ctcf_bdgp6_peaks.narrowPeak", format = "narrowPeak")
+edb <- ah[["AH119285"]]        # Ensembl 113 EnsDb, BDGP6, Ensembl-style chr names
+genes <- genes(edb)            # extract genes as GRanges
+
+seqlevels(peaks)[1:10]
+seqlevels(genes)[1:10]
+
+hits <- findOverlaps(peaks, genes)
+length(hits)
+peak_in_gene <- peaks[queryHits(hits)[1]]
+peak_in_gene
+```
+
+```{r}
+library(epiwraps)
+
+plotSignalTracks(
+  list(ctcf = "aligned/ctcf_bdgp6.bam", peaks = peaks),
+  region = peak_in_gene,
+  extend = 5000
+)
+```
+
+
+

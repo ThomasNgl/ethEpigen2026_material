@@ -1,1 +1,31 @@
 ._*
+
+
+# Ignore common large data formats
+*.bam
+*.bai
+*.fastq
+*.fastq.gz
+*.fq.gz
+*.bed
+*.bigwig
+*.bw
+*.h5
+*.hdf5
+*.rds
+*.RData
+
+# Ignore any data/ or results/ folders
+data/
+results/
+cache/
+tmp/
+
+# But always track assignments (override above rules)
+!**/assignment*.html
+!**/assignment*.Rmd
+!**/assignment*.rmdweek03/BDGP6_genome/
+week03/aligned/
+week03/dm3_standard/
+week03/peaks/
+week04/peaks/

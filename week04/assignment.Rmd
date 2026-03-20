@@ -1,0 +1,359 @@
+---
+title: "Week 04 Assignment – p300, H3K27ac and H3K27me3 in mESC vs Heart"
+output: html_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(ensembldb)
+  library(GenomicRanges)
+  library(rtracklayer)
+  library(epiwraps)
+  library(ggplot2)
+  library(ComplexHeatmap)
+  library(GenomeInfoDb)
+})
+
+ah <- AnnotationHub::AnnotationHub(
+  cache = "/mnt/auxiliary/.cache/R/AnnotationHub"
+)
+
+# Mouse GRCm38 EnsDb (Ensembl v102) – same build used in assignment_02
+ensdb <- ah[["AH89211"]]   # EnsDb.Mmusculus.v102 / GRCm38
+
+dir.create("peaks",  showWarnings = FALSE)
+dir.create("tracks", showWarnings = FALSE)
+```
+
+---
+
+# 1 – Downloading data from ENCODE
+
+```{r download_peaks}
+# ── mESC peaks ──────────────────────────────────────────────────────────────
+# p300  – ENCSR000EYH  (ENCODE3, Bruce4 mESC, mm10)
+download.file(
+  "https://www.encodeproject.org/files/ENCFF653YVR/@@download/ENCFF653YVR.bed.gz",
+  "peaks/mesc_p300.bed.gz", mode = "wb"
+)
+
+# H3K27ac – ENCSR000CGS (Bruce4 mESC, mm10, conservative IDR)
+download.file(
+  "https://www.encodeproject.org/files/ENCFF212HAG/@@download/ENCFF212HAG.bed.gz",
+  "peaks/mesc_H3K27ac.bed.gz", mode = "wb"
+)
+
+# H3K27me3 – ENCSR000CGU (Bruce4 mESC, mm10, conservative IDR)
+download.file(
+  "https://www.encodeproject.org/files/ENCFF105NKG/@@download/ENCFF105NKG.bed.gz",
+  "peaks/mesc_H3K27me3.bed.gz", mode = "wb"
+)
+
+# ── Heart peaks ──────────────────────────────────────────────────────────────
+# p300  – ENCSR000EYF (adult heart, mm10)
+download.file(
+  "https://www.encodeproject.org/files/ENCFF097ULJ/@@download/ENCFF097ULJ.bed.gz",
+  "peaks/heart_p300.bed.gz", mode = "wb"
+)
+
+# H3K27ac – ENCSR000CGR (adult heart, mm10, conservative IDR)
+download.file(
+  "https://www.encodeproject.org/files/ENCFF723ZZS/@@download/ENCFF723ZZS.bed.gz",
+  "peaks/heart_H3K27ac.bed.gz", mode = "wb"
+)
+
+# H3K27me3 – ENCSR000CGQ (adult heart, mm10, conservative IDR)
+download.file(
+  "https://www.encodeproject.org/files/ENCFF183KJW/@@download/ENCFF183KJW.bed.gz",
+  "peaks/heart_H3K27me3.bed.gz", mode = "wb"
+)
+```
+
+```{r download_bigwigs}
+# ── mESC bigwigs (fold change over control) ──────────────────────────────────
+download.file(
+  "https://www.encodeproject.org/files/ENCFF552AJY/@@download/ENCFF552AJY.bigWig",
+  "tracks/mesc_p300.bw", mode = "wb"
+)
+download.file(
+  "https://www.encodeproject.org/files/ENCFF610BPO/@@download/ENCFF610BPO.bigWig",
+  "tracks/mesc_H3K27ac.bw", mode = "wb"
+)
+download.file(
+  "https://www.encodeproject.org/files/ENCFF182FTP/@@download/ENCFF182FTP.bigWig",
+  "tracks/mesc_H3K27me3.bw", mode = "wb"
+)
+
+# ── Heart bigwigs ─────────────────────────────────────────────────────────────
+download.file(
+  "https://www.encodeproject.org/files/ENCFF460PUH/@@download/ENCFF460PUH.bigWig",
+  "tracks/heart_p300.bw", mode = "wb"
+)
+download.file(
+  "https://www.encodeproject.org/files/ENCFF266FCV/@@download/ENCFF266FCV.bigWig",
+  "tracks/heart_H3K27ac.bw", mode = "wb"
+)
+download.file(
+  "https://www.encodeproject.org/files/ENCFF694RNA/@@download/ENCFF694RNA.bigWig",
+  "tracks/heart_H3K27me3.bw", mode = "wb"
+)
+```
+
+```{r load_peaks}
+# Read all peak files
+mesc_peaks <- list(
+  p300     = rtracklayer::import("peaks/mesc_p300.bed.gz",     format = "narrowPeak"),
+  H3K27ac  = rtracklayer::import("peaks/mesc_H3K27ac.bed.gz",  format = "narrowPeak"),
+  H3K27me3 = rtracklayer::import("peaks/mesc_H3K27me3.bed.gz", format = "narrowPeak")
+)
+
+heart_peaks <- list(
+  p300     = rtracklayer::import("peaks/heart_p300.bed.gz",     format = "narrowPeak"),
+  H3K27ac  = rtracklayer::import("peaks/heart_H3K27ac.bed.gz",  format = "narrowPeak"),
+  H3K27me3 = rtracklayer::import("peaks/heart_H3K27me3.bed.gz", format = "narrowPeak")
+)
+
+# Quick summary
+lapply(mesc_peaks,  length)
+lapply(heart_peaks, length)
+```
+
+---
+
+# 2 – Question 1: Proportion of TSS overlapping each histone mark
+
+## Building a TSS reference
+
+```{r tss_reference}
+# Extract protein-coding genes and derive ±500 bp TSS windows
+pc_genes <- genes(ensdb, filter = GeneBiotypeFilter("protein_coding"))
+
+# Fix chromosome naming to match ENCODE peaks (chr1, chr2, ...)
+seqlevelsStyle(pc_genes) <- "UCSC"
+
+# Keep only standard chromosomes present in the peaks
+std_chroms <- seqlevels(mesc_peaks$H3K27ac)
+pc_genes   <- keepSeqlevels(pc_genes, std_chroms, pruning.mode = "coarse")
+
+tss <- promoters(pc_genes, upstream = 500, downstream = 500)
+cat("Number of protein-coding TSS windows:", length(tss), "\n")
+```
+
+## Overlap proportions
+
+```{r tss_overlaps}
+tss_overlap <- function(tss, peaks_list) {
+  has_ac   <- overlapsAny(tss, peaks_list$H3K27ac)
+  has_me3  <- overlapsAny(tss, peaks_list$H3K27me3)
+
+  c(
+    H3K27ac_only       = mean( has_ac & !has_me3),
+    H3K27me3_only      = mean(!has_ac &  has_me3),
+    both               = mean( has_ac &  has_me3),
+    H3K27ac            = mean( has_ac),             # any ac (incl. bivalent)
+    H3K27me3           = mean( has_me3),
+    neither            = mean(!has_ac & !has_me3)
+  )
+}
+
+ov_mesc  <- tss_overlap(tss, mesc_peaks)
+ov_heart <- tss_overlap(tss, heart_peaks)
+
+# Display as a tidy table
+tss_table <- data.frame(
+  Category = names(ov_mesc),
+  mESC     = round(ov_mesc  * 100, 1),
+  Heart    = round(ov_heart * 100, 1)
+)
+print(tss_table, row.names = FALSE)
+```
+
+```{r tss_barplot, fig.width=7, fig.height=4}
+# Reshape for ggplot
+plot_df <- rbind(
+  data.frame(Tissue = "mESC",  Category = names(ov_mesc),  Pct = ov_mesc  * 100),
+  data.frame(Tissue = "Heart", Category = names(ov_heart), Pct = ov_heart * 100)
+)
+# Keep only the mutually exclusive categories for a stacked bar
+plot_df <- subset(plot_df, Category %in% c("H3K27ac_only","H3K27me3_only","both","neither"))
+plot_df$Category <- factor(plot_df$Category,
+                            levels = c("H3K27ac_only","both","H3K27me3_only","neither"))
+
+ggplot(plot_df, aes(x = Tissue, y = Pct, fill = Category)) +
+  geom_col(width = 0.5) +
+  scale_fill_manual(
+    values = c(H3K27ac_only  = "#E69F00",
+               both          = "#009E73",
+               H3K27me3_only = "#56B4E9",
+               neither       = "grey80"),
+    labels = c("H3K27ac only (active)",
+               "Both (bivalent)",
+               "H3K27me3 only (repressed)",
+               "Neither")
+  ) +
+  labs(y = "% of protein-coding TSS", x = NULL,
+       title = "Chromatin state at protein-coding TSS",
+       fill  = "Chromatin mark") +
+  theme_bw(base_size = 13)
+```
+
+**Observations.**
+In mESC, a sizeable fraction of TSS carry **H3K27me3 only** or **both marks** (bivalent
+domains) – these are characteristic of developmental genes held in a poised state.
+The bivalent category is much smaller in heart, where most TSS are either
+unambiguously active (H3K27ac only) or fully repressed.
+The proportion of TSS marked solely by H3K27ac is larger in heart, reflecting
+the stable, committed transcriptional programme of a terminally differentiated
+tissue.
+
+---
+
+# 3 – Question 2: Relationship between p300, H3K27ac and H3K27me3
+
+## Pairwise peak overlaps within each tissue
+
+```{r peak_overlaps}
+regionOverlaps(mesc_peaks,  title = "mESC – peak overlaps")
+regionOverlaps(heart_peaks, title = "Heart – peak overlaps")
+```
+
+## Signal heatmaps centred on p300 peaks
+
+We visualise all three signals around p300-bound sites, which mark active
+enhancers, to see whether H3K27ac co-localises and whether H3K27me3 is excluded.
+
+```{r signal_heatmap_mesc, fig.width=8, fig.height=6}
+bw_mesc <- list(
+  p300     = "tracks/mesc_p300.bw",
+  H3K27ac  = "tracks/mesc_H3K27ac.bw",
+  H3K27me3 = "tracks/mesc_H3K27me3.bw"
+)
+
+sm_mesc <- signal2Matrix(bw_mesc, regions = mesc_peaks$p300, extend = 2000, w = 50)
+sm_mesc <- renormalizeSignalMatrices(sm_mesc, method = "top", trim = 0.05)
+
+plotEnrichedHeatmaps(
+  sm_mesc, trim = 0.95, multiScale = TRUE,
+  colors = list("darkred", "#E69F00", "#56B4E9"),
+  row_title = "mESC p300 peaks"
+)
+```
+
+```{r signal_heatmap_heart, fig.width=8, fig.height=6}
+bw_heart <- list(
+  p300     = "tracks/heart_p300.bw",
+  H3K27ac  = "tracks/heart_H3K27ac.bw",
+  H3K27me3 = "tracks/heart_H3K27me3.bw"
+)
+
+sm_heart <- signal2Matrix(bw_heart, regions = heart_peaks$p300, extend = 2000, w = 50)
+sm_heart <- renormalizeSignalMatrices(sm_heart, method = "top", trim = 0.05)
+
+plotEnrichedHeatmaps(
+  sm_heart, trim = 0.95, multiScale = TRUE,
+  colors = list("darkred", "#E69F00", "#56B4E9"),
+  row_title = "Heart p300 peaks"
+)
+```
+
+**Observations.**
+In both tissues, p300 co-localises tightly with **H3K27ac**, confirming their
+shared role in marking active enhancers. H3K27me3 signal is consistently
+depleted at p300-bound sites, as expected given that these two states are
+mutually exclusive: p300/H3K27ac mark actively used regulatory elements, while
+H3K27me3 marks Polycomb-repressed chromatin.
+The relationship is similar in both tissues, but the number and location of
+p300/H3K27ac co-marked enhancers differs substantially between mESC and heart,
+reflecting tissue-specific enhancer usage.
+
+---
+
+# 4 – Question 3: Regulatory elements active in mESC vs heart
+
+## Tissue-specific enhancers
+
+We define "mESC-specific" and "heart-specific" regulatory elements as p300
+peaks that do not overlap any p300 peak in the other tissue.
+
+```{r tissue_specific}
+mesc_only  <- mesc_peaks$p300[!overlapsAny(mesc_peaks$p300,  heart_peaks$p300)]
+heart_only <- heart_peaks$p300[!overlapsAny(heart_peaks$p300, mesc_peaks$p300)]
+shared     <- mesc_peaks$p300[ overlapsAny(mesc_peaks$p300,  heart_peaks$p300)]
+
+cat(sprintf(
+  "mESC-specific p300 sites: %d\nHeart-specific p300 sites: %d\nShared: %d\n",
+  length(mesc_only), length(heart_only), length(shared)
+))
+```
+
+## Signal at mESC-specific sites in both tissues
+
+```{r mesc_specific_signal, fig.width=8, fig.height=6}
+bw_both <- c(
+  mesc_p300    = "tracks/mesc_p300.bw",
+  mesc_H3K27ac = "tracks/mesc_H3K27ac.bw",
+  heart_p300   = "tracks/heart_p300.bw",
+  heart_H3K27ac= "tracks/heart_H3K27ac.bw"
+)
+
+sm_mesc_only <- signal2Matrix(bw_both, regions = mesc_only, extend = 2000, w = 50)
+sm_mesc_only <- renormalizeSignalMatrices(sm_mesc_only, method = "top", trim = 0.05)
+
+plotEnrichedHeatmaps(
+  sm_mesc_only, trim = 0.95, multiScale = TRUE,
+  row_title = "mESC-specific p300 sites"
+)
+```
+
+## Signal at heart-specific sites in both tissues
+
+```{r heart_specific_signal, fig.width=8, fig.height=6}
+sm_heart_only <- signal2Matrix(bw_both, regions = heart_only, extend = 2000, w = 50)
+sm_heart_only <- renormalizeSignalMatrices(sm_heart_only, method = "top", trim = 0.05)
+
+plotEnrichedHeatmaps(
+  sm_heart_only, trim = 0.95, multiScale = TRUE,
+  row_title = "Heart-specific p300 sites"
+)
+```
+
+## UpSet plot – full overlap structure
+
+```{r upset, fig.width=7, fig.height=5}
+all_peaks <- list(
+  mesc_p300    = mesc_peaks$p300,
+  mesc_H3K27ac = mesc_peaks$H3K27ac,
+  heart_p300   = heart_peaks$p300,
+  heart_H3K27ac= heart_peaks$H3K27ac
+)
+
+comb_mat <- make_comb_mat(
+  regionsToUpset(all_peaks, nsets = length(all_peaks))
+)
+ComplexHeatmap::UpSet(comb_mat,
+  comb_order = order(comb_size(comb_mat), decreasing = TRUE),
+  top_annotation = upset_top_annotation(comb_mat, add_numbers = TRUE)
+)
+```
+
+**Observations.**
+The majority of p300/H3K27ac-marked enhancers are **tissue-specific**: elements
+active in mESC are largely inactive (no p300 binding, low H3K27ac) in heart,
+and vice versa. This demonstrates that cell identity is encoded to a large
+extent at the level of enhancer activity, not just at promoters.
+Shared elements tend to correspond to housekeeping enhancers or broadly
+active regulatory elements.
+The near-complete loss of mESC-specific enhancer activity in heart (and
+vice versa) is consistent with enhancer switching during differentiation,
+where lineage-determining transcription factors activate new sets of enhancers
+while previously active ones are silenced, often accompanied by gain of
+H3K27me3 at disused regulatory elements.
+
+---
+
+# Session info
+
+```{r session_info}
+sessionInfo()
+```

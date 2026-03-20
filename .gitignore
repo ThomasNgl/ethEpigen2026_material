@@ -8,12 +8,14 @@
 *.fastq.gz
 *.fq.gz
 *.bed
+*.bed.gz
 *.bigwig
 *.bw
 *.h5
 *.hdf5
 *.rds
 *.RData
+*.bt2
 
 # Ignore any data/ or results/ folders
 data/

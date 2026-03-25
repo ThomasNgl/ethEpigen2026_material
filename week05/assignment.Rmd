@@ -1,0 +1,520 @@
+---
+title: "ATAC-seq differential accessibility in mouse hippocampus"
+output: html_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6.5,
+  dpi = 150,
+  fig.align = "center"
+)
+```
+
+## Data import and sample annotation
+
+```{r libraries}
+library(SummarizedExperiment)
+library(GenomicRanges)
+library(edgeR)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+library(dplyr)
+library(tibble)
+```
+
+```{r import-data}
+se <- readRDS("mouse_mm38_hippocampus.peakCounts.SE.rds")
+se
+```
+
+The object contains one assay of ATAC-seq peak counts and 12 samples. Since the original `colData` only contains sequencing depth, stress status and sex were reconstructed from the sample names.
+
+```{r sample-annotation}
+build_sample_df <- function(se) {
+  samples <- colnames(se)
+  sample_df <- data.frame(
+    sample = samples,
+    stress = ifelse(grepl("^FSS_", samples), "FSS", "Control"),
+    sex = ifelse(grepl("_female_", samples), "female", "male"),
+    depth = colData(se)$depth,
+    row.names = samples
+  )
+  sample_df$stress <- factor(sample_df$stress, levels = c("Control", "FSS"))
+  sample_df$sex <- factor(sample_df$sex, levels = c("female", "male"))
+  sample_df
+}
+
+sample_df <- build_sample_df(se)
+colData(se) <- cbind(colData(se), DataFrame(sample_df))
+
+table(colData(se)$stress, colData(se)$sex)
+```
+
+## Exploratory QC
+
+TMM-normalized log-CPM values were used for exploratory sample-level QC.
+
+```{r qc-objects}
+y <- DGEList(counts = assay(se, "counts"))
+y <- calcNormFactors(y, method = "TMM")
+logcpm <- cpm(y, log = TRUE, prior.count = 2)
+
+ann <- data.frame(
+  stress = sample_df$stress,
+  sex = sample_df$sex,
+  row.names = rownames(sample_df)
+)
+
+ann_colors <- list(
+  stress = c(Control = "#4DBBD5", FSS = "#E64B35"),
+  sex = c(female = "#D8B70A", male = "#00A087")
+)
+
+display_names <- sub("\\.bam$", "", colnames(se))
+```
+
+```{r corr-heatmap, fig.width=11, fig.height=9}
+cor_mat <- cor(logcpm)
+
+pheatmap(
+  cor_mat,
+  labels_row = display_names,
+  labels_col = display_names,
+  annotation_row = ann,
+  annotation_col = ann,
+  annotation_colors = ann_colors,
+  fontsize = 9,
+  fontsize_row = 8,
+  fontsize_col = 8,
+  angle_col = 45,
+  border_color = NA,
+  main = "Sample-sample correlation (TMM logCPM)"
+)
+```
+
+```{r mds-plot, fig.width=10, fig.height=7}
+mds <- plotMDS(y, plot = FALSE)
+mds_df <- data.frame(
+  x = mds$x,
+  y = mds$y,
+  sample = display_names,
+  stress = sample_df$stress,
+  sex = sample_df$sex,
+  depth = sample_df$depth
+)
+
+ggplot(mds_df, aes(x = x, y = y, color = sex, shape = stress, label = sample)) +
+  geom_point(size = 3) +
+  geom_text_repel(size = 3.5, max.overlaps = Inf) +
+  labs(
+    title = "MDS plot of ATAC-seq samples",
+    x = "Leading logFC dim 1",
+    y = "Leading logFC dim 2"
+  ) +
+  theme_bw()
+```
+
+Two samples appear somewhat distinct, `Control_female_GSM6041843` and `FSS_female_GSM6041854`. Overall, separation by sex appears stronger than separation by stress condition.
+
+```{r depth-vs-mds}
+center_x <- mean(mds_df$x)
+center_y <- mean(mds_df$y)
+mds_df$dist_to_center <- sqrt((mds_df$x - center_x)^2 + (mds_df$y - center_y)^2)
+
+cor.test(mds_df$dist_to_center, mds_df$depth, method = "spearman")
+
+ggplot(mds_df, aes(x = dist_to_center, y = depth, label = sample, shape = stress)) +
+  geom_point(aes(color = sex), size = 3) +
+  geom_text_repel(size = 3.5, max.overlaps = Inf) +
+  labs(
+    title = "Distance to MDS centroid vs sequencing depth",
+    x = "Distance to centroid in 2D MDS",
+    y = "Sequencing depth"
+  ) +
+  theme_bw()
+```
+
+Sequencing depth may show a weak trend with distance to the MDS centroid, but this association is not statistically significant.
+
+## Differential accessibility analysis
+
+Differential accessibility was tested with edgeR quasi-likelihood GLMs using TMM normalization. For the stress analysis, sex was included as a covariate. For the sex analysis, stress was included as a covariate.
+
+```{r analysis-functions}
+prepare_dge <- function(se) {
+  y <- DGEList(counts = assay(se, "counts"))
+  calcNormFactors(y, method = "TMM")
+}
+
+run_da <- function(se, formula, coef_name = NULL, contrast = NULL) {
+  sample_df <- build_sample_df(se)
+  y <- prepare_dge(se)
+  design <- model.matrix(formula, data = sample_df)
+
+  y <- estimateDisp(y, design)
+  fit <- glmQLFit(y, design)
+
+  if (!is.null(coef_name)) {
+    qlf <- glmQLFTest(fit, coef = coef_name)
+    test_name <- coef_name
+  } else if (!is.null(contrast)) {
+    qlf <- glmQLFTest(fit, contrast = contrast)
+    test_name <- "custom_contrast"
+  } else {
+    stop("Provide either coef_name or contrast.")
+  }
+
+  tab <- topTags(qlf, n = Inf)$table
+  rr <- rowRanges(se)
+
+  res <- tab %>%
+    rownames_to_column("row_id") %>%
+    mutate(
+      idx = as.integer(row_id),
+      chr = as.character(seqnames(rr))[idx],
+      start = start(rr)[idx],
+      end = end(rr)[idx],
+      region = paste0(chr, ":", start, "-", end)
+    ) %>%
+    relocate(region, chr, start, end, row_id)
+
+  list(
+    sample_df = sample_df,
+    y = y,
+    design = design,
+    fit = fit,
+    qlf = qlf,
+    results = res,
+    test_name = test_name
+  )
+}
+
+plot_pvalue_hist <- function(res, title = "P-value distribution") {
+  ggplot(res, aes(x = PValue)) +
+    geom_histogram(
+      breaks = seq(0, 1, by = 0.05),
+      fill = "grey70",
+      color = "white"
+    ) +
+    scale_x_continuous(breaks = seq(0, 1, by = 0.1), limits = c(0, 1)) +
+    labs(
+      title = title,
+      x = "P-value",
+      y = "Number of regions"
+    ) +
+    theme_bw(base_size = 12)
+}
+
+plot_volcano <- function(
+  res,
+  title = "Volcano plot",
+  p_cutoff = 0.05,
+  fdr_cutoff = 0.05,
+  lfc_cutoff = 1,
+  n_label = 5
+) {
+  res2 <- res %>%
+    mutate(
+      neglog10P = -log10(PValue),
+      status = case_when(
+        FDR < fdr_cutoff & logFC >=  lfc_cutoff ~ "FDR < 0.05 & logFC >= cutoff",
+        FDR < fdr_cutoff & logFC <= -lfc_cutoff ~ "FDR < 0.05 & logFC <= -cutoff",
+        PValue < p_cutoff & logFC >=  lfc_cutoff ~ "P < 0.05 & logFC >= cutoff",
+        PValue < p_cutoff & logFC <= -lfc_cutoff ~ "P < 0.05 & logFC <= -cutoff",
+        TRUE ~ "NS"
+      )
+    )
+
+  n_lab <- min(n_label, nrow(res2))
+
+  top_lab <- res2 %>%
+    arrange(FDR, PValue) %>%
+    slice_head(n = n_lab) %>%
+    mutate(label = region)
+
+  ggplot(res2, aes(x = logFC, y = neglog10P)) +
+    geom_point(aes(color = status), alpha = 0.8, size = 1.8) +
+    geom_text_repel(
+      data = top_lab,
+      aes(label = label),
+      size = 3.2,
+      max.overlaps = Inf,
+      box.padding = 0.35,
+      point.padding = 0.2,
+      segment.linewidth = 0.3
+    ) +
+    geom_vline(xintercept = c(-lfc_cutoff, lfc_cutoff), linetype = 2, linewidth = 0.4) +
+    geom_hline(yintercept = -log10(p_cutoff), linetype = 2, linewidth = 0.4) +
+    scale_color_manual(
+      values = c(
+        "NS" = "grey75",
+        "P < 0.05 & logFC >= cutoff" = "#E64B35",
+        "P < 0.05 & logFC <= -cutoff" = "#4DBBD5",
+        "FDR < 0.05 & logFC >= cutoff" = "#B2182B",
+        "FDR < 0.05 & logFC <= -cutoff" = "#2166AC"
+      )
+    ) +
+    labs(
+      title = title,
+      x = "log2 fold-change",
+      y = expression(-log[10](PValue)),
+      color = NULL
+    ) +
+    theme_bw(base_size = 12) +
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(face = "bold")
+    )
+}
+
+plot_sig_heatmap <- function(
+  se,
+  da,
+  which = c("pvalue", "fdr"),
+  cutoff = 0.05,
+  max_regions = 100,
+  scale_rows = TRUE,
+  title = NULL
+) {
+  which <- match.arg(which)
+
+  sample_df <- da$sample_df
+  y <- da$y
+  res <- da$results
+
+  if (which == "pvalue") {
+    sel <- res %>% filter(PValue < cutoff) %>% arrange(PValue)
+    default_title <- paste0("Regions with PValue < ", cutoff)
+  } else {
+    sel <- res %>% filter(FDR < cutoff) %>% arrange(FDR, PValue)
+    default_title <- paste0("Regions with FDR < ", cutoff)
+  }
+
+  if (nrow(sel) == 0) {
+    message("No regions passed the selected threshold.")
+    return(invisible(NULL))
+  }
+
+  sel <- sel %>% slice_head(n = min(max_regions, nrow(sel)))
+
+  mat <- cpm(y, log = TRUE, prior.count = 2)[sel$row_id, , drop = FALSE]
+  rownames(mat) <- sel$region
+
+  if (scale_rows) {
+    mat <- t(scale(t(mat)))
+    mat[is.na(mat)] <- 0
+  }
+
+  ann <- data.frame(
+    stress = sample_df$stress,
+    sex = sample_df$sex,
+    depth = sample_df$depth,
+    row.names = rownames(sample_df)
+  )
+  ann <- ann[colnames(mat), , drop = FALSE]
+
+  pheatmap(
+    mat,
+    annotation_col = ann,
+    labels_col = sub("\\.bam$", "", colnames(mat)),
+    show_rownames = nrow(mat) <= 40,
+    fontsize_col = 8,
+    fontsize_row = 7,
+    angle_col = 45,
+    border_color = NA,
+    main = if (is.null(title)) default_title else title
+  )
+}
+
+summarize_da <- function(da, fdr_thr = 0.05) {
+  res <- da$results
+  best <- res[which.min(res$FDR), ]
+  data.frame(
+    test = da$test_name,
+    n_regions = nrow(res),
+    n_fdr_sig = sum(res$FDR < fdr_thr, na.rm = TRUE),
+    top_region = best$region,
+    top_fdr = best$FDR
+  )
+}
+
+run_and_plot_da <- function(se, formula, coef_name, prefix, max_regions = 100) {
+  da <- run_da(se, formula = formula, coef_name = coef_name)
+
+  print(summarize_da(da))
+  print(head(da$results[, c("region", "logFC", "logCPM", "PValue", "FDR")], 10))
+  print(plot_pvalue_hist(da$results, paste(prefix, "p-value distribution")))
+  print(plot_volcano(da$results, title = paste(prefix, "volcano plot")))
+
+  plot_sig_heatmap(
+    se, da,
+    which = "pvalue",
+    cutoff = 0.05,
+    max_regions = max_regions,
+    title = paste(prefix, ": regions with PValue < 0.05")
+  )
+
+  plot_sig_heatmap(
+    se, da,
+    which = "fdr",
+    cutoff = 0.05,
+    max_regions = max_regions,
+    title = paste(prefix, ": regions with FDR < 0.05")
+  )
+
+  invisible(da)
+}
+
+drop_samples <- function(se, samples_to_drop) {
+  se[, !colnames(se) %in% samples_to_drop]
+}
+
+compare_models <- function(...) {
+  das <- list(...)
+  nm <- names(das)
+  bind_rows(lapply(seq_along(das), function(i) {
+    da <- das[[i]]
+    res <- da$results
+    data.frame(
+      model = if (length(nm) && nzchar(nm[i])) nm[i] else paste0("model_", i),
+      test = da$test_name,
+      n_regions = nrow(res),
+      n_pval_lt_0_05 = sum(res$PValue < 0.05, na.rm = TRUE),
+      n_fdr_lt_0_05 = sum(res$FDR < 0.05, na.rm = TRUE),
+      min_pvalue = min(res$PValue, na.rm = TRUE),
+      min_fdr = min(res$FDR, na.rm = TRUE)
+    )
+  }))
+}
+```
+
+### Stress vs control
+
+```{r stress-full, fig.width=10, fig.height=9}
+stress_da <- run_and_plot_da(
+  se,
+  formula = ~ sex + stress,
+  coef_name = "stressFSS",
+  prefix = "Stress vs Control"
+)
+```
+
+The stress comparison did not yield FDR-significant regions at 0.05, although several regions showed low nominal p-values.
+
+### Male vs female
+
+```{r sex-full, fig.width=10, fig.height=9}
+sex_da <- run_and_plot_da(
+  se,
+  formula = ~ stress + sex,
+  coef_name = "sexmale",
+  prefix = "Male vs Female"
+)
+```
+
+The sex comparison showed a much stronger signal, with multiple regions remaining significant after FDR correction.
+
+## Interaction model and sensitivity analysis
+
+Given the stronger separation by sex in the exploratory QC, I also explored an interaction model to test whether the stress effect differed by sex. In addition, I repeated the analyses after excluding the two visually more isolated samples (`Control_female_GSM6041843.bam` and `FSS_female_GSM6041854.bam`) as a sensitivity analysis.
+
+```{r filtered-se}
+outlier_samples <- c(
+  "Control_female_GSM6041843.bam",
+  "FSS_female_GSM6041854.bam"
+)
+
+se_filt <- drop_samples(se, outlier_samples)
+```
+
+### Interaction model on full data
+
+```{r interaction-full, fig.width=10, fig.height=9}
+interaction_da <- run_and_plot_da(
+  se,
+  formula = ~ sex * stress,
+  coef_name = "sexmale:stressFSS",
+  prefix = "Interaction: sex × stress"
+)
+```
+
+### Stress model after excluding two samples
+
+```{r stress-filtered, fig.width=10, fig.height=9}
+stress_da_filt <- run_and_plot_da(
+  se_filt,
+  formula = ~ sex + stress,
+  coef_name = "stressFSS",
+  prefix = "Stress vs Control (filtered)"
+)
+```
+
+### Sex model after excluding two samples
+
+```{r sex-filtered, fig.width=10, fig.height=9}
+sex_da_filt <- run_and_plot_da(
+  se_filt,
+  formula = ~ stress + sex,
+  coef_name = "sexmale",
+  prefix = "Male vs Female (filtered)"
+)
+```
+
+### Interaction model after excluding two samples
+
+```{r interaction-filtered, fig.width=10, fig.height=9}
+interaction_da_filt <- run_and_plot_da(
+  se_filt,
+  formula = ~ sex * stress,
+  coef_name = "sexmale:stressFSS",
+  prefix = "Interaction: sex × stress (filtered)"
+)
+```
+
+## Summary table across models
+
+```{r model-comparison-table}
+model_summary <- compare_models(
+  stress_full = stress_da,
+  sex_full = sex_da,
+  interaction_full = interaction_da,
+  stress_filtered = stress_da_filt,
+  sex_filtered = sex_da_filt,
+  interaction_filtered = interaction_da_filt
+)
+
+model_summary
+```
+
+# Add depth as covariate 
+
+```{r}
+stress_depth_da <- run_and_plot_da(
+  se,
+  formula = ~ sex + depth + stress,
+  coef_name = "stressFSS",
+  prefix = "Stress adjusted for depth"
+)
+
+```
+
+```{r}
+
+sex_depth_da <- run_and_plot_da(
+  se,
+  formula = ~ stress + depth + sex,
+  coef_name = "sexmale",
+  prefix = "Sex adjusted for depth"
+)
+```
+
+# Adding depth as covariate makes doesn't improve the analysis
+
+
+

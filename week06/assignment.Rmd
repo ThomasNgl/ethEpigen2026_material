@@ -1,0 +1,112 @@
+---
+title: "Motif Analysis Assignment – REST"
+output: html_document
+---
+```{r setup, message=FALSE, warning=FALSE}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(GenomicRanges)
+  library(motifmatchr)
+  library(Biostrings)
+  library(MotifDb)
+  library(TFBSTools)
+  library(GenomeInfoDb)
+  library(universalmotif)
+  library(rtracklayer)
+})
+```
+
+```{r download_peaks}
+download.file(
+  "https://www.encodeproject.org/files/ENCFF368VWJ/@@download/ENCFF368VWJ.bed.gz",
+  destfile = "REST_mouse_peaks.bed.gz",
+  mode = "wb"
+)
+
+peaks <- rtracklayer::import("REST_mouse_peaks.bed.gz", format = "narrowPeak")
+
+# Convert chromosome names to Ensembl style (no 'chr' prefix)
+seqlevelsStyle(peaks) <- "Ensembl"
+
+length(peaks)
+head(peaks)
+```
+```{r genome}
+ah <- AnnotationHub(cache = "/mnt/auxiliary/.cache/R/AnnotationHub")
+# Mouse GRCm38 genome sequence
+genome <- ah[["AH68356"]]
+genome_seqs <- import(genome)
+genome_seqs
+```
+```{r motif}
+# Search for REST motif in the database
+motifs_rest <- query(MotifDb, c("REST"))
+names(motifs_rest)
+
+motif <- motifs_rest[["Mmusculus-HOCOMOCOv10-REST_MOUSE.H10MO.A"]]
+
+# Visualize it
+view_motifs(motif)
+```
+```{r scan_peaks}
+# Convert motif to TFBSTools format for motifmatchr
+motif2 <- convert_motifs(motif, class = "TFBSTools-PWMatrix")
+
+# Write genome to fasta (needed by motifmatchr)
+Biostrings::writeXStringSet(genome_seqs, "genome.fa")
+
+# Scan peaks for motif occurrences
+moi_peaks <- motifmatchr::matchMotifs(
+  motif2,
+  subject = peaks,
+  genome = Rsamtools::FaFile("genome.fa"),
+  out = "positions"
+)[[1]]
+
+head(moi_peaks)
+hist(moi_peaks$score, main = "REST motif scores in peaks", xlab = "score")
+```
+
+```{r q1_peaks_with_motif}
+# How many peaks contain at least one motif instance?
+peaks_with_motif <- overlapsAny(peaks, moi_peaks)
+
+n_peaks <- length(peaks)
+n_peaks_with_motif <- sum(peaks_with_motif)
+pct <- round(100 * n_peaks_with_motif / n_peaks, 1)
+
+cat(sprintf(
+  "Of the %d REST peaks, %d (%s%%) contain a motif for the factor.\n",
+  n_peaks, n_peaks_with_motif, pct
+))
+```
+
+```{r scan_genome}
+# Scan the entire genome for REST motif occurrences
+motif_genome <- motifmatchr::matchMotifs(
+  motif2,
+  subject = genome_seqs,
+  out = "positions"
+)[[1]]
+
+# Convert to GRanges
+names(motif_genome) <- names(genome_seqs)
+motif_genome <- as(motif_genome, "GRanges")
+
+length(motif_genome)
+head(motif_genome)
+```
+
+```{r q2_motif_instances_in_peaks}
+# How many genome-wide motif instances overlap a peak?
+motif_in_peak <- overlapsAny(motif_genome, peaks)
+
+n_motifs <- length(motif_genome)
+n_motifs_in_peak <- sum(motif_in_peak)
+pct2 <- round(100 * n_motifs_in_peak / n_motifs, 2)
+
+cat(sprintf(
+  "Of the %d REST motif instances in the genome, %d (%s%%) overlap a peak.\n",
+  n_motifs, n_motifs_in_peak, pct2
+))
+```

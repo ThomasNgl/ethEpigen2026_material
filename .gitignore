@@ -26,7 +26,8 @@ tmp/
 # But always track assignments (override above rules)
 !**/assignment*.html
 !**/assignment*.Rmd
-!**/assignment*.rmdweek03/BDGP6_genome/
+!**/assignment*.rmd
+week03/BDGP6_genome/
 week03/aligned/
 week03/dm3_standard/
 week03/peaks/

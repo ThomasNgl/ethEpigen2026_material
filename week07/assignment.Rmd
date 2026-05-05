@@ -1,0 +1,168 @@
+---
+title: "Week 07 Assignment"
+author: "Thomas"
+output: html_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+suppressPackageStartupMessages({
+  library(epiwraps)
+  library(AnnotationHub)
+  library(MotifDb)
+  library(memes)
+  library(universalmotif)
+  library(ggplot2)
+  library(motifmatchr)
+  library(TFBSTools)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  library(betterChromVAR)
+  library(limma)
+  library(sechm)
+})
+```
+
+## Part 1: ATAC-seq signal around transcription factor motifs
+
+```{r part1-data}
+data_dir <- if (basename(getwd()) == "week07") "." else "week07"
+zip_file <- file.path(data_dir, "w7_bw.zip")
+
+if (!file.exists(zip_file)) {
+  download.file("https://ethz-ins.org/content/w7/w7_bw.zip", zip_file, mode = "wb")
+}
+
+if (!all(file.exists(file.path(data_dir, c("NF_cuts.bw", "mono_centers.bw"))))) {
+  unzip(zip_file, exdir = data_dir)
+}
+
+tracks <- list.files(data_dir, pattern = "\\.bw$", full.names = TRUE)
+names(tracks) <- gsub("\\.bw$", "", basename(tracks))
+tracks[c("NF_cuts", "mono_centers")]
+```
+
+```{r part1-motifs}
+ah <- AnnotationHub(localHub = TRUE, cache = "/mnt/auxiliary/.cache/R/AnnotationHub")
+
+motif <- MotifDb::query(MotifDb, c("CTCF", "Mus"))[[1]]
+motif <- universalmotif::convert_motifs(motif, class = "TFBSTools-PFMatrix")
+
+genome <- ah[["AH68356"]]
+chr19 <- rtracklayer::import(genome)["19"]
+
+motif_sites <- motifmatchr::matchMotifs(
+  motif,
+  chr19,
+  out = "positions",
+  p.cutoff = 1e-5
+)[[1]]
+
+motif_sites <- as(setNames(motif_sites, names(chr19)), "GRanges")
+motif_sites
+```
+
+```{r part1-plot, fig.width=8, fig.height=4}
+part1_tracks <- tracks[c("NF_cuts", "mono_centers")]
+
+signal_matrix <- epiwraps::signal2Matrix(
+  part1_tracks,
+  motif_sites,
+  w = 5,
+  extend = 300
+)
+
+signal_df <- epiwraps::meltSignals(signal_matrix)
+
+ggplot(signal_df, aes(position, mean, colour = sample)) +
+  geom_line(linewidth = 1.1) +
+  labs(
+    x = "Position relative to CTCF motif center (bp)",
+    y = "Mean ATAC-seq signal",
+    colour = "Signal",
+    title = "ATAC-seq signal around CTCF motifs on chr19"
+  ) +
+  theme_classic()
+```
+
+## Part 2: Sex-associated motif accessibility differences
+
+```{r part2-data}
+data_dir <- if (basename(getwd()) == "week07") "." else "week07"
+peak_file <- file.path(data_dir, "peakCounts.rds")
+
+if (!file.exists(peak_file)) {
+  download.file(
+    "https://ethz-ins.org/content/mouse_mm38_hippocampus.peakCounts.SE.rds",
+    peak_file,
+    mode = "wb"
+  )
+}
+
+se <- readRDS(peak_file)
+se$sex <- ifelse(grepl("_female_", colnames(se)), "Female", "Male")
+se$group <- ifelse(grepl("^FSS_", colnames(se)), "Stressed", "Control")
+table(se$group, se$sex)
+```
+
+```{r part2-gc-bias}
+se <- GenomeInfoDb::keepStandardChromosomes(se, pruning.mode = "coarse")
+GenomeInfoDb::seqlevelsStyle(se) <- "UCSC"
+se <- betterChromVAR::addGCBias(se, genome = BSgenome.Mmusculus.UCSC.mm10)
+"bias" %in% names(SummarizedExperiment::rowData(se))
+```
+
+```{r part2-motif-matching}
+motifs <- MotifDb::query(MotifDb, "HOCOMOCOv13")
+
+motifs <- do.call(
+  TFBSTools::PWMatrixList,
+  universalmotif::convert_motifs(motifs, class = "TFBSTools-PWMatrix")
+)
+
+names(motifs) <- make.unique(sapply(motifs, \(x) gsub("\\..+", "", x@name)))
+
+matches <- motifmatchr::matchMotifs(
+  motifs,
+  se,
+  genome = BSgenome.Mmusculus.UCSC.mm10
+)
+
+matches
+```
+
+```{r part2-deviations}
+dev <- betterChromVAR::betterChromVAR(se, matches)
+dev$sex <- se$sex
+dev$group <- se$group
+dev
+```
+
+```{r part2-differential}
+design <- model.matrix(
+  ~ group + sex,
+  data = as.data.frame(SummarizedExperiment::colData(dev))
+)
+
+fit <- limma::eBayes(
+  limma::lmFit(SummarizedExperiment::assay(dev, "z"), design)
+)
+
+res <- as.data.frame(
+  limma::topTable(fit, coef = "sexMale", number = Inf)
+)
+
+res$motif <- row.names(res)
+head(res[, c("motif", "logFC", "P.Value", "adj.P.Val")], 10)
+summary(res$adj.P.Val < 0.05)
+```
+
+```{r part2-heatmap, fig.width=7, fig.height=5}
+top_motifs <- head(res$motif, 10)
+dev$condition_sex <- paste(dev$group, dev$sex, sep = "_")
+
+sechm::sechm(
+  dev,
+  top_motifs,
+  gaps_at = "condition_sex",
+  assayName = "z"
+)
+```

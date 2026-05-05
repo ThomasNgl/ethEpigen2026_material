@@ -32,3 +32,9 @@ week03/aligned/
 week03/dm3_standard/
 week03/peaks/
 week04/peaks/
+# Week 07 downloaded data
+week07/atac.chr19.bam
+week07/atac.chr19.bam.bai
+week07/w7_bw.zip
+week07/*.bw
+week07/peakCounts.rds

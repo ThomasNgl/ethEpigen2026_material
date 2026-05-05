@@ -1,0 +1,95 @@
+---
+title: "Week 08 Assignment"
+author: "Thomas"
+output: html_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+suppressPackageStartupMessages({
+  library(bsseq)
+  library(GenomicRanges)
+  library(S4Vectors)
+  library(ggplot2)
+  library(pheatmap)
+})
+```
+
+## Part 1: Methylation levels in the top chr1 DMRs
+
+```{r part1}
+data_dir <- if (basename(getwd()) == "week08") "." else "week08"
+
+bs <- readRDS(file.path(data_dir, "ESC_astrocytes_BSseq.rds"))
+dmrRanges <- readRDS(file.path(data_dir, "dmr.rds"))
+
+dmr_chr1 <- dmrRanges[GenomicRanges::seqnames(dmrRanges) == "chr1"]
+dmr_chr1 <- dmr_chr1[order(abs(dmr_chr1$meandiff), decreasing = TRUE)]
+top5_dmrs <- head(dmr_chr1, 5)
+
+met_top5 <- bsseq::getMeth(
+  bs,
+  regions = top5_dmrs,
+  what = "perRegion",
+  type = "raw"
+)
+
+row_labels <- top5_dmrs$overlapping.genes
+row_labels[is.na(row_labels) | row_labels == ""] <- paste0(
+  as.character(GenomicRanges::seqnames(top5_dmrs))[is.na(row_labels) | row_labels == ""],
+  ":",
+  GenomicRanges::start(top5_dmrs)[is.na(row_labels) | row_labels == ""],
+  "-",
+  GenomicRanges::end(top5_dmrs)[is.na(row_labels) | row_labels == ""]
+)
+
+rownames(met_top5) <- row_labels
+
+pheatmap::pheatmap(
+  met_top5,
+  name = "methylation",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE
+)
+```
+
+## Part 2: Comparing methylation and accessibility changes
+
+```{r part2}
+data_dir <- if (basename(getwd()) == "week08") "." else "week08"
+
+dmrRanges <- readRDS(file.path(data_dir, "dmr.rds"))
+atac <- readRDS(file.path(data_dir, "ATAC_AstroVsESC_subset.rds"))
+
+hits <- GenomicRanges::findOverlaps(dmrRanges, atac)
+
+overlap_df <- data.frame(
+  dmr_index = S4Vectors::queryHits(hits),
+  atac_index = S4Vectors::subjectHits(hits),
+  dmr_meandiff = dmrRanges$meandiff[S4Vectors::queryHits(hits)],
+  atac_logFC = atac$logFC[S4Vectors::subjectHits(hits)],
+  atac_FDR = atac$FDR[S4Vectors::subjectHits(hits)],
+  overlapping_genes = dmrRanges$overlapping.genes[S4Vectors::queryHits(hits)]
+)
+
+overlap_df$direction <- ifelse(
+  sign(overlap_df$dmr_meandiff) == sign(overlap_df$atac_logFC),
+  "same direction",
+  "opposite direction"
+)
+
+table(overlap_df$direction)
+
+ggplot(overlap_df, aes(dmr_meandiff, atac_logFC, colour = direction)) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  geom_vline(xintercept = 0, linewidth = 0.3) +
+  geom_point(alpha = 0.7) +
+  labs(
+    x = "DMR methylation difference",
+    y = "ATAC accessibility logFC",
+    colour = "Direction",
+    title = "Comparison of methylation and accessibility changes"
+  ) +
+  theme_classic()
+```
+I compared differential methylation and differential accessibility by overlapping DMRs with differential ATAC regions and plotting DMR `meandiff` against ATAC `logFC`. Most overlaps showed opposite directions of change (3026 opposite vs 2253 same), consistent with an inverse relationship between DNA methylation and chromatin accessibility in many regions. However, the substantial number of same-direction overlaps indicates that this relationship is not universal and likely depends on genomic context.
+

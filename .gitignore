@@ -38,3 +38,9 @@ week07/atac.chr19.bam.bai
 week07/w7_bw.zip
 week07/*.bw
 week07/peakCounts.rds
+# Week 08 downloaded data
+week08/w11_practical.zip
+week08/ESC_astrocytes_BSseq.rds
+week08/hg19_chr1_genes.rds
+week08/comparison/
+week08/ATAC_AstroVsESC_subset.rds

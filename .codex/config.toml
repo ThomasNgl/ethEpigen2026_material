@@ -1,0 +1,4 @@
+# Default to repository analysis and review.
+# Editing should happen only when explicitly requested.
+sandbox_mode = "read-only"
+ask_for_approval = "on-request"

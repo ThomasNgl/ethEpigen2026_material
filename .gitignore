@@ -44,3 +44,5 @@ week08/ESC_astrocytes_BSseq.rds
 week08/hg19_chr1_genes.rds
 week08/comparison/
 week08/ATAC_AstroVsESC_subset.rds
+# Week 09 downloaded data
+week09/clustering_assignment.zip

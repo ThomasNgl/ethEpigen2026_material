@@ -1,0 +1,232 @@
+---
+title: "Week 09 Assignment"
+author: "Thomas"
+output: html_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(rtracklayer)
+  library(SummarizedExperiment)
+  library(S4Vectors)
+  library(epiwraps)
+  library(ggplot2)
+  library(rGREAT)
+})
+
+set.seed(123)
+```
+
+## Part 1: Download and prepare the data
+
+```{r download}
+data_dir <- if (basename(getwd()) == "week09") "." else "week09"
+zip_file <- file.path(data_dir, "clustering_assignment.zip")
+
+if (!file.exists(zip_file)) {
+  options(timeout = 6000)
+  download.file(
+    "https://ethz-ins.org/content/clustering_assignment.zip",
+    destfile = zip_file,
+    mode = "wb"
+  )
+}
+
+if (length(list.files(data_dir, pattern = "\\.(bed|bw|bigWig)$", ignore.case = TRUE)) == 0) {
+  unzip(zip_file, exdir = data_dir)
+}
+
+bed_files <- list.files(data_dir, pattern = "\\.bed$", full.names = TRUE, ignore.case = TRUE)
+track_files <- list.files(data_dir, pattern = "\\.(bw|bigWig)$", full.names = TRUE, ignore.case = TRUE)
+names(track_files) <- tools::file_path_sans_ext(basename(track_files))
+
+bed_files
+track_files
+```
+
+```{r regions}
+peaks <- lapply(bed_files, rtracklayer::import.bed)
+names(peaks) <- tools::file_path_sans_ext(basename(bed_files))
+
+high_confidence_peaks <- lapply(peaks, function(x) {
+  if ("score" %in% colnames(S4Vectors::mcols(x))) {
+    x[x$score > 800]
+  } else {
+    x
+  }
+})
+
+regions <- GenomicRanges::reduce(unlist(GenomicRanges::GRangesList(high_confidence_peaks)))
+regions <- GenomicRanges::sort(regions)
+
+lengths(high_confidence_peaks)
+length(regions)
+```
+
+## Part 2: Cluster the binding profiles
+
+```{r signal-matrix, fig.width=9, fig.height=7}
+ese <- epiwraps::signal2Matrix(track_files, regions, extend = 2000)
+
+epiwraps::plotEnrichedHeatmaps(
+  ese,
+  cluster_rows = TRUE,
+  show_row_dend = TRUE,
+  colors = c("white", "darkred")
+)
+```
+
+```{r choose-k, fig.width=7, fig.height=4}
+set.seed(123)
+cl_range <- epiwraps::clusterSignalMatrices(ese, k = 2:12)
+
+ggplot(cl_range$varExplained, aes(k, varExplained)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    x = "Number of clusters",
+    y = "Variance explained",
+    title = "Choosing the number of clusters"
+  ) +
+  theme_classic()
+```
+
+The variance curve decreased gradually rather than showing a sharp elbow, so there was no single obvious optimal value of `k`. I therefore chose `k = 6` as a compromise: it separates the main binding patterns visible in the heatmap while keeping enough regions in each cluster for downstream enrichment analysis.
+
+```{r cluster-profiles, fig.width=9, fig.height=7}
+set.seed(123)
+cl <- epiwraps::clusterSignalMatrices(ese, k = 6, scaleRows = TRUE)
+rowData(ese)$cluster <- factor(cl)
+
+table(rowData(ese)$cluster)
+
+cluster_colors <- c(
+  "1" = "#D55E00",
+  "2" = "#0072B2",
+  "3" = "#009E73",
+  "4" = "#CC79A7",
+  "5" = "#E69F00",
+  "6" = "#56B4E9"
+)
+
+epiwraps::plotEnrichedHeatmaps(
+  ese,
+  row_split = "cluster",
+  scale_rows = "global",
+  mean_color = cluster_colors,
+  colors = c("white", "darkred")
+)
+```
+
+```{r cluster-averages, fig.width=9, fig.height=6}
+cluster_means <- epiwraps::meltSignals(ese, splitBy = rowData(ese)$cluster)
+
+ggplot(cluster_means, aes(position, mean, colour = sample)) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~split) +
+  labs(
+    x = "Position relative to peak center",
+    y = "Mean ChIP-seq signal",
+    colour = "Factor",
+    title = "Average binding profiles by cluster"
+  ) +
+  theme_classic()
+```
+
+## Part 3: Gene Ontology enrichment
+
+```{r split-regions}
+split_regions <- split(rowRanges(ese), rowData(ese)$cluster)
+lengths(split_regions)
+```
+
+```{r great-all-clusters, message=FALSE, warning=FALSE}
+enrichment_tables <- lapply(names(split_regions), function(cluster_id) {
+  res <- rGREAT::great(
+    split_regions[[cluster_id]],
+    gene_sets = "GO:BP",
+    tss_source = "hg38",
+    background = regions,
+    cores = 2
+  )
+
+  tab <- rGREAT::getEnrichmentTables(res)
+  tab[order(tab$p_adjust, tab$p_adjust_hyper), ]
+})
+
+names(enrichment_tables) <- names(split_regions)
+
+enrichment_summary <- do.call(rbind, lapply(names(enrichment_tables), function(cluster_id) {
+  tab <- enrichment_tables[[cluster_id]]
+
+  data.frame(
+    cluster = cluster_id,
+    n_regions = length(split_regions[[cluster_id]]),
+    top_term = tab$description[1],
+    fold_enrichment = tab$fold_enrichment[1],
+    p_adjust = tab$p_adjust[1],
+    p_adjust_hyper = tab$p_adjust_hyper[1]
+  )
+}))
+
+enrichment_summary
+```
+
+```{r select-enrichment-cluster}
+cluster_for_enrichment <- as.character(
+  enrichment_summary$cluster[which.min(enrichment_summary$p_adjust)]
+)
+
+bp <- enrichment_tables[[cluster_for_enrichment]]
+bp <- bp[order(bp$p_adjust, bp$p_adjust_hyper), ]
+
+cluster_for_enrichment
+length(split_regions[[cluster_for_enrichment]])
+head(bp, 10)
+```
+
+```{r enrichment-plot, fig.width=9, fig.height=6}
+top_bp <- head(bp, 15)
+
+ggplot(
+  top_bp,
+  aes(fold_enrichment, reorder(description, p_adjust),
+      size = observed_region_hits, color = -log10(p_adjust))
+) +
+  geom_point() +
+  scale_color_viridis_c() +
+  labs(
+    x = "Fold enrichment",
+    y = "GO biological process",
+    size = "Region hits",
+    color = "-log10 adjusted P",
+    title = paste("GO enrichment for cluster", cluster_for_enrichment)
+  ) +
+  theme_classic()
+```
+
+## Results
+
+```{r results-paragraph, results='asis'}
+cluster_sizes <- table(rowData(ese)$cluster)
+largest_cluster <- names(cluster_sizes)[which.max(cluster_sizes)]
+top_terms <- paste(head(bp$description, 3), collapse = ", ")
+
+cat(
+  "After filtering the CREB-family peak sets for high-confidence peaks, I obtained ",
+  length(regions),
+  " non-redundant chromosome 1 regions. I clustered the ChIP-seq signal over these regions into six groups, with cluster ",
+  largest_cluster,
+  " being the largest (",
+  max(cluster_sizes),
+  " regions). The average profile plot showed both protein-specific groups and groups where multiple CREB-family factors were enriched at the same regions, indicating that the three factors do not occupy all high-confidence regions in the same way. I compared GO Biological Process enrichment across all six clusters and selected cluster ",
+  cluster_for_enrichment,
+  " for detailed visualization because it had the smallest adjusted enrichment P-value. The top enriched GO Biological Process terms in this cluster included ",
+  top_terms,
+  ". Because cluster ",
+  cluster_for_enrichment,
+  " showed stronger CREB3 signal than the other CREB-family factors, these results suggest that CREB3-bound regions may be associated with genes involved in cell communication and signaling-related processes.",
+  sep = ""
+)
+```

@@ -1,0 +1,333 @@
+---
+title: "Week 10 Assignment"
+author: "Thomas"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(GenomeInfoDb)
+  library(rtracklayer)
+  library(S4Vectors)
+  library(IRanges)
+  library(dplyr)
+  library(ggplot2)
+})
+
+set.seed(123)
+```
+
+
+```{r}
+data_dir <- if (basename(getwd()) == "week10") "." else "week10"
+
+peak_file <- file.path(data_dir, "GATA2_K562_peaks.bed.gz")
+re2g_file <- file.path(data_dir, "K562_re2g_thresholded_links.bed.gz")
+promoter_file <- file.path(data_dir, "promoters.rds")
+
+if (!file.exists(peak_file)) {
+  download.file(
+    "https://www.encodeproject.org/files/ENCFF772OKO/@@download/ENCFF772OKO.bed.gz",
+    destfile = peak_file,
+    mode = "wb"
+  )
+}
+
+if (!file.exists(re2g_file)) {
+  download.file(
+    "https://www.encodeproject.org/files/ENCFF600XIR/@@download/ENCFF600XIR.bed.gz",
+    destfile = re2g_file,
+    mode = "wb"
+  )
+}
+
+if (!file.exists(promoter_file)) {
+  download.file(
+    "https://ethz-ins.org/content/hgEns104.promoters.rds",
+    destfile = promoter_file,
+    mode = "wb"
+  )
+}
+```
+
+```{r}
+peak_tbl <- read.delim(gzfile(peak_file), header = FALSE, stringsAsFactors = FALSE)
+
+colnames(peak_tbl)[1:10] <- c(
+  "chrom", "start", "end", "name", "score", "strand",
+  "signalValue", "pValue", "qValue", "peak"
+)
+
+peaks <- GRanges(
+  seqnames = peak_tbl$chrom,
+  ranges = IRanges(start = peak_tbl$start + 1, end = peak_tbl$end),
+  strand = "*",
+  name = peak_tbl$name,
+  score = peak_tbl$score,
+  signalValue = peak_tbl$signalValue,
+  pValue = peak_tbl$pValue,
+  qValue = peak_tbl$qValue,
+  peak = peak_tbl$peak
+)
+
+suppressWarnings(seqlevelsStyle(peaks) <- "UCSC")
+peaks <- keepStandardChromosomes(peaks, pruning.mode = "coarse")
+peaks$peak_id <- seq_along(peaks)
+
+peaks
+```
+```{r}
+re2g_tbl <- read.delim(gzfile(re2g_file), header = TRUE, check.names = FALSE)
+
+names(re2g_tbl)
+head(re2g_tbl)
+```
+
+
+```{r}
+find_col <- function(nms, choices, pattern = NULL) {
+  hit <- match(tolower(choices), tolower(nms), nomatch = 0)
+  if (any(hit > 0)) return(nms[hit[hit > 0][1]])
+
+  if (!is.null(pattern)) {
+    hit <- grep(pattern, nms, ignore.case = TRUE, value = TRUE)
+    if (length(hit) > 0) return(hit[1])
+  }
+
+  NA_character_
+}
+
+nms <- names(re2g_tbl)
+
+chr_col <- find_col(nms, c("chr", "chrom", "chromosome"))
+start_col <- find_col(nms, c("start", "chromStart"))
+end_col <- find_col(nms, c("end", "chromEnd"))
+gene_col <- find_col(nms, c("TargetGene", "target_gene", "gene", "gene_name"), pattern = "TargetGene|gene")
+
+if (is.na(chr_col)) chr_col <- nms[1]
+if (is.na(start_col)) start_col <- nms[2]
+if (is.na(end_col)) end_col <- nms[3]
+
+stopifnot(!is.na(gene_col))
+
+re2g <- GRanges(
+  seqnames = re2g_tbl[[chr_col]],
+  ranges = IRanges(
+    start = as.integer(re2g_tbl[[start_col]]) + 1,
+    end = as.integer(re2g_tbl[[end_col]])
+  ),
+  target_gene = re2g_tbl[[gene_col]]
+)
+
+suppressWarnings(seqlevelsStyle(re2g) <- "UCSC")
+re2g <- keepStandardChromosomes(re2g, pruning.mode = "coarse")
+re2g <- re2g[!is.na(re2g$target_gene) & re2g$target_gene != ""]
+
+re2g
+```
+
+```{r}
+ov <- findOverlaps(peaks, re2g, ignore.strand = TRUE)
+
+peak_targets <- data.frame(
+  peak_id = peaks$peak_id[queryHits(ov)],
+  target_gene = re2g$target_gene[subjectHits(ov)]
+) |>
+  distinct()
+
+linked_peak_ids <- unique(peak_targets$peak_id)
+linked_peaks <- peaks[peaks$peak_id %in% linked_peak_ids]
+
+length(peaks)
+length(linked_peaks)
+head(peak_targets)
+```
+
+```{r}
+promoters <- readRDS(promoter_file)
+suppressWarnings(seqlevelsStyle(promoters) <- "UCSC")
+promoters <- keepStandardChromosomes(promoters, pruning.mode = "coarse")
+promoters <- promoters[!is.na(promoters$gene_name) & promoters$gene_name != ""]
+
+tss_position <- ifelse(
+  as.character(strand(promoters)) == "+",
+  start(promoters) + 100,
+  end(promoters) - 100
+)
+
+tss <- GRanges(
+  seqnames = seqnames(promoters),
+  ranges = IRanges(tss_position, width = 1),
+  strand = strand(promoters),
+  gene_name = promoters$gene_name
+)
+
+tss <- tss[!duplicated(paste(seqnames(tss), start(tss), strand(tss), tss$gene_name))]
+
+tss
+```
+
+```{r}
+nearest_hit <- distanceToNearest(peaks, tss, ignore.strand = TRUE)
+
+nearest_tbl <- data.frame(
+  peak_id = peaks$peak_id[queryHits(nearest_hit)],
+  nearest_gene = tss$gene_name[subjectHits(nearest_hit)],
+  nearest_tss_distance = mcols(nearest_hit)$distance
+)
+
+head(nearest_tbl)
+```
+
+```{r}
+peak_info <- data.frame(
+  peak_id = peaks$peak_id,
+  peak_chr = as.character(seqnames(peaks)),
+  peak_center = start(peaks) + floor((width(peaks) - 1) / 2)
+)
+
+tss_info <- data.frame(
+  gene_name = tss$gene_name,
+  peak_chr = as.character(seqnames(tss)),
+  target_tss = start(tss),
+  target_strand = as.character(strand(tss))
+) |>
+  distinct()
+
+analysis_tbl <- peak_targets |>
+  mutate(link_id = row_number()) |>
+  left_join(peak_info, by = "peak_id") |>
+  inner_join(
+    tss_info,
+    by = c("target_gene" = "gene_name", "peak_chr"),
+    relationship = "many-to-many"
+  ) |>
+  mutate(
+    signed_distance = ifelse(
+      target_strand == "+",
+      peak_center - target_tss,
+      target_tss - peak_center
+    ),
+    target_distance = abs(signed_distance),
+    direction = ifelse(signed_distance < 0, "upstream", "downstream")
+  ) |>
+  group_by(link_id) |>
+  slice_min(target_distance, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  left_join(nearest_tbl, by = "peak_id") |>
+  select(
+    peak_id, target_gene, target_tss, target_strand,
+    signed_distance, target_distance, direction,
+    nearest_gene, nearest_tss_distance
+  )
+
+head(analysis_tbl)
+```
+
+
+```{r}
+summary_tbl <- analysis_tbl |>
+  group_by(direction) |>
+  summarise(
+    n_peak_target_links = n(),
+    n_unique_peaks = n_distinct(peak_id),
+    proportion_target_is_nearest_gene = mean(target_gene == nearest_gene),
+    .groups = "drop"
+  )
+
+summary_tbl
+```
+
+```{r}
+ggplot(analysis_tbl, aes(target_distance / 1000)) +
+  geom_histogram(bins = 60, fill = "steelblue", color = "white") +
+  facet_wrap(~ direction, scales = "free_y") +
+  labs(
+    x = "Distance from GATA2 peak center to predicted target TSS (kb)",
+    y = "Number of peak-target links",
+    title = "Distances between GATA2 peaks and predicted rE2G target genes"
+  ) +
+  theme_classic()
+```
+
+```{r}
+ggplot(analysis_tbl, aes(target_distance / 1000, y = after_stat(count + 1))) +
+  geom_histogram(bins = 60, fill = "steelblue", color = "white") +
+  facet_wrap(~ direction, scales = "free_y") +
+  scale_y_log10() +
+  labs(
+    x = "Distance from GATA2 peak center to predicted target TSS (kb)",
+    y = "Number of peak-target links + 1 (log10 scale)",
+    title = "Distances between GATA2 peaks and predicted rE2G target genes"
+  ) +
+  theme_classic()
+```
+
+```{r}
+ggplot(analysis_tbl, aes((target_distance + 1) / 1000, y = after_stat(count + 1))) +
+  geom_histogram(bins = 60, fill = "steelblue", color = "white") +
+  facet_wrap(~ direction, scales = "free_y") +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(
+    x = "Distance from GATA2 peak center to predicted target TSS + 1 bp (kb, log10 scale)",
+    y = "Number of peak-target links + 1 (log10 scale)",
+    title = "Distances between GATA2 peaks and predicted rE2G target genes"
+  ) +
+  theme_classic()
+```
+
+```{r}
+ggplot(summary_tbl, aes(direction, proportion_target_is_nearest_gene)) +
+  geom_col(fill = "darkorange") +
+  ylim(0, 1) +
+  labs(
+    x = NULL,
+    y = "Proportion",
+    title = "Predicted target is also the nearest gene"
+  ) +
+  theme_classic()
+```
+
+## Results
+
+```{r results-paragraph, results='asis'}
+upstream_prop <- summary_tbl$proportion_target_is_nearest_gene[
+  summary_tbl$direction == "upstream"
+]
+
+downstream_prop <- summary_tbl$proportion_target_is_nearest_gene[
+  summary_tbl$direction == "downstream"
+]
+
+median_upstream <- median(
+  analysis_tbl$target_distance[analysis_tbl$direction == "upstream"] / 1000,
+  na.rm = TRUE
+)
+
+median_downstream <- median(
+  analysis_tbl$target_distance[analysis_tbl$direction == "downstream"] / 1000,
+  na.rm = TRUE
+)
+
+cat(
+  "I used GATA2 ChIP-seq peaks from K562 cells and ENCODE-rE2G thresholded enhancer-gene predictions from the same cell type. Of ",
+  length(peaks),
+  " total GATA2 peaks, ",
+  length(linked_peaks),
+  " overlapped at least one rE2G element-gene link and were therefore kept for the comparison. ",
+  "For upstream peak-target links, the predicted rE2G target was also the nearest TSS gene in ",
+  round(100 * upstream_prop, 1),
+  "% of cases. For downstream peak-target links, this was true in ",
+  round(100 * downstream_prop, 1),
+  "% of cases. The median distance between the peak center and the predicted target TSS was ",
+  round(median_upstream, 1),
+  " kb for upstream links and ",
+  round(median_downstream, 1),
+  " kb for downstream links. These results show that rE2G assigns many GATA2-bound regulatory regions to predicted target genes that are not necessarily the nearest gene in linear genomic distance.",
+  sep = ""
+)
+```
+
+
